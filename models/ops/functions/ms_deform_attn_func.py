@@ -17,11 +17,24 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
+from torch.onnx.symbolic_helper import _get_tensor_sizes
 
 import MultiScaleDeformableAttention as MSDA
 
 
 class MSDeformAttnFunction(Function):
+    
+    # @staticmethod
+    # def symbolic(g, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step):
+    #     output = g.op('com.microsoft::MultiScaleDeformableAttn',value, value_spatial_shapes, sampling_locations, attention_weights)
+        
+    #     bs, _, mum_heads, embed_dims_num_heads = _get_tensor_sizes(value)
+    #     bs, num_queries, _, _, _, _ = _get_tensor_sizes(sampling_locations)
+    #     output_shape = [bs, num_queries, mum_heads * embed_dims_num_heads]
+    #     output.setType(value.type().with_sizes(output_shape))
+
+    #     return output
+    
     @staticmethod
     def forward(ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step):
         ctx.im2col_step = im2col_step

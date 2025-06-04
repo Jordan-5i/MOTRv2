@@ -6,3 +6,9 @@ build/
 *.egg
 *.egg-info
 *.mp4
+*.zip
+pretrained
+*.txt
+*.onnx
+*.tar
+*.npy

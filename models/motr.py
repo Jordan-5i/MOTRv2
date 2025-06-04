@@ -706,6 +706,138 @@ class MOTR(nn.Module):
         return outputs
 
 
+class MOTR_ONNX(MOTR):
+    def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed, aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False, query_denoise=0):
+        super().__init__(backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed, aux_loss, with_box_refine, two_stage, memory_bank, use_checkpoint, query_denoise)
+
+    def _generate_empty_tracks_my(self, proposals=None):
+        num_queries, d_model = self.query_embed.weight.shape  # (300, 512)
+        device = self.query_embed.weight.device
+        if proposals is None:
+            ref_pts = self.position.weight
+            query_pos = self.query_embed.weight
+        else:
+            ref_pts = torch.cat([self.position.weight, proposals[:, :4]])
+            query_pos = torch.cat([self.query_embed.weight, pos2posemb(proposals[:, 4:], d_model) + self.yolox_embed.weight])
+        output_embedding = torch.zeros((16, d_model), device=device)
+        obj_idxes = torch.full((16,), -1, dtype=torch.long, device=device)
+        matched_gt_idxes = torch.full((16,), -1, dtype=torch.long, device=device)
+        disappear_time = torch.zeros((16, ), dtype=torch.long, device=device)
+        iou = torch.ones((16,), dtype=torch.float, device=device)
+        scores = torch.zeros((16,), dtype=torch.float, device=device)
+        track_scores = torch.zeros((16,), dtype=torch.float, device=device)
+        pred_boxes = torch.zeros((16, 4), dtype=torch.float, device=device)
+        pred_logits = torch.zeros((16, self.num_classes), dtype=torch.float, device=device)
+
+        mem_bank_len = self.mem_bank_len
+        mem_bank = torch.zeros((16, mem_bank_len, d_model), dtype=torch.float32, device=device)
+        mem_padding_mask = torch.ones((16, mem_bank_len), dtype=torch.bool, device=device)
+        save_period = torch.zeros((16, ), dtype=torch.float32, device=device)
+
+        return query_pos, ref_pts, mem_bank, mem_padding_mask
+        
+    def _backbone_forward(self, img, mask):
+        # 这里的backbone是一个Joiner类，里面有backbone和position_embedding两个部分
+        xs = self.backbone[0].body(img)
+        out = []
+        pos = []
+        for name, x in sorted(xs.items()):
+            m = mask.clone()
+            assert m is not None
+            m = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+            out.append((x, m))
+        
+        # position encoding
+        for x in out:
+            pos.append(self._position_embedding_sine_forward(x[0], x[1]).to(x[0].dtype))
+        
+        return out, pos
+    
+    def _position_embedding_sine_forward(self, img, mask):
+        x = img
+        assert mask is not None
+        not_mask = ~mask
+        y_embed = not_mask.cumsum(1, dtype=torch.float32)
+        x_embed = not_mask.cumsum(2, dtype=torch.float32)
+        if self.backbone[1].normalize:
+            eps = 1e-6
+            y_embed = (y_embed - 0.5) / (y_embed[:, -1:, :] + eps) * self.backbone[1].scale
+            x_embed = (x_embed - 0.5) / (x_embed[:, :, -1:] + eps) * self.backbone[1].scale
+
+        dim_t = torch.arange(self.backbone[1].num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.backbone[1].temperature ** (2 * (dim_t // 2) / self.backbone[1].num_pos_feats)
+
+        pos_x = x_embed[:, :, :, None] / dim_t
+        pos_y = y_embed[:, :, :, None] / dim_t
+        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
+        return pos
+    
+    def inference_single_image(self, img, mask, ori_img_size, query_pos, ref_pts, mem_bank, mem_padding_mask, proposals=None):
+        features, pos = self._backbone_forward(img, mask)
+        src, mask = features[-1]
+        assert mask is not None
+        
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            src, mask = feat
+            srcs.append(self.input_proj[l](src))
+            masks.append(mask)
+            assert mask is not None
+                                    
+        if self.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
+            for l in range(_len_srcs, self.num_feature_levels):
+                if l == _len_srcs:
+                    src = self.input_proj[l](features[-1][0])
+                else:
+                    src = self.input_proj[l](srcs[-1])
+                m = mask
+                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                pos_l = self._position_embedding_sine_forward(src, mask).to(src.dtype)
+                srcs.append(src)
+                masks.append(mask)
+                pos.append(pos_l)
+
+        # gtboxes is None
+        query_embed = query_pos
+        ref_pts = ref_pts
+        attn_mask = None
+        
+        hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = \
+            self.transformer(srcs, masks, pos, query_embed, ref_pts=ref_pts,
+                             mem_bank=mem_bank, mem_bank_pad_mask=mem_padding_mask, attn_mask=attn_mask)
+        
+        outputs_classes = []
+        outputs_coords = []
+        for lvl in range(hs.shape[0]):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+            reference = inverse_sigmoid(reference)
+            outputs_class = self.class_embed[lvl](hs[lvl])
+            tmp = self.bbox_embed[lvl](hs[lvl])
+            if reference.shape[-1] == 4:
+                tmp += reference
+            else:
+                assert reference.shape[-1] == 2
+                tmp[..., :2] += reference
+            outputs_coord = tmp.sigmoid()
+            outputs_classes.append(outputs_class)
+            outputs_coords.append(outputs_coord)
+        outputs_class = torch.stack(outputs_classes)
+        outputs_coord = torch.stack(outputs_coords)
+
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
+        out['hs'] = hs[-1]
+        return out
+
+
 def build(args):
     dataset_to_num_classes = {
         'coco': 91,
@@ -758,19 +890,35 @@ def build(args):
     criterion = ClipMatcher(num_classes, matcher=img_matcher, weight_dict=weight_dict, losses=losses)
     criterion.to(device)
     postprocessors = {}
-    model = MOTR(
-        backbone,
-        transformer,
-        track_embed=query_interaction_layer,
-        num_feature_levels=args.num_feature_levels,
-        num_classes=num_classes,
-        num_queries=args.num_queries,
-        aux_loss=args.aux_loss,
-        criterion=criterion,
-        with_box_refine=args.with_box_refine,
-        two_stage=args.two_stage,
-        memory_bank=memory_bank,
-        use_checkpoint=args.use_checkpoint,
-        query_denoise=args.query_denoise,
-    )
+    if args.export:
+        model = MOTR_ONNX(        
+            backbone,
+            transformer,
+            track_embed=query_interaction_layer,
+            num_feature_levels=args.num_feature_levels,
+            num_classes=num_classes,
+            num_queries=args.num_queries,
+            aux_loss=args.aux_loss,
+            criterion=criterion,
+            with_box_refine=args.with_box_refine,
+            two_stage=args.two_stage,
+            memory_bank=memory_bank,
+            use_checkpoint=args.use_checkpoint,
+            query_denoise=args.query_denoise,)
+    else:
+        model = MOTR(
+            backbone,
+            transformer,
+            track_embed=query_interaction_layer,
+            num_feature_levels=args.num_feature_levels,
+            num_classes=num_classes,
+            num_queries=args.num_queries,
+            aux_loss=args.aux_loss,
+            criterion=criterion,
+            with_box_refine=args.with_box_refine,
+            two_stage=args.two_stage,
+            memory_bank=memory_bank,
+            use_checkpoint=args.use_checkpoint,
+            query_denoise=args.query_denoise,
+        )
     return model, criterion, postprocessors
