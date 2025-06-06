@@ -101,6 +101,34 @@ class Detector(object):
         keep = areas > area_threshold
         return dt_instances[keep]
 
+    def prepare_mask_pos_encoding(self, img, mask):
+        features, pos = self.detr._backbone_forward(img, mask)
+        src, mask = features[-1]
+        
+        srcs = []
+        masks = []
+        for l, feat in enumerate(features):
+            src, mask = feat
+            srcs.append(self.detr.input_proj[l](src))
+            masks.append(mask)
+            assert mask is not None
+                                    
+        if self.detr.num_feature_levels > len(srcs):
+            _len_srcs = len(srcs)
+            for l in range(_len_srcs, self.detr.num_feature_levels):
+                if l == _len_srcs:
+                    src = self.detr.input_proj[l](features[-1][0])
+                else:
+                    src = self.input_proj[l](srcs[-1])
+                m = mask
+                mask = torch.nn.functional.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
+                pos_l = self.detr._position_embedding_sine_forward(src, mask).to(src.dtype)
+                srcs.append(src)
+                masks.append(mask)
+                pos.append(pos_l)
+                
+        return masks, pos
+    
     def detect(self, prob_threshold=0.6, area_threshold=100, vis=False):
         total_dts = 0
         total_occlusion_dts = 0
@@ -129,26 +157,37 @@ class Detector(object):
                 self.detr.cpu()
                 if track_instances is None:
                     track_instances = self.detr._generate_empty_tracks(proposals)
+                else:
+                    track_instances = Instances.cat([
+                        self.detr._generate_empty_tracks(proposals),
+                        track_instances.to('cpu')])
                 query_pos = track_instances.query_pos.cpu()
                 ref_pts = track_instances.ref_pts.cpu()
                 mem_bank = track_instances.mem_bank.cpu()
                 mem_padding_mask = track_instances.mem_padding_mask.cpu()
                 mask = nested_tensor_from_tensor_list(cur_img).mask
                 
+                # 预计算位置编码，和masks中有效比例
+                masks, pos = self.prepare_mask_pos_encoding(cur_img, mask)
+                valid_ratios = torch.stack([self.detr.transformer.get_valid_ratio(m) for m in masks], 1)
+                
+                setattr(self.detr.transformer, "valid_ratios", valid_ratios)
+                setattr(self.detr, "pos", pos)
+                setattr(self.detr, "masks", masks)
+
                 self.detr.forward = self.detr.inference_single_image
                 torch.onnx.export(self.detr, 
-                                  (cur_img, mask, (seq_h, seq_w), query_pos, ref_pts, mem_bank, mem_padding_mask, proposals),
-                                  "motrv2.onnx", 
-                                  input_names=["cur_img", "mask", "ori_img_size", "query_pos", "ref_pts", "mem_bank", "mem_padding_mask", "proposals"],
+                                  (cur_img, query_pos, ref_pts, mem_bank, mem_padding_mask),
+                                  "motrv2-no-mask-position.onnx", 
+                                  input_names=["cur_img", "query_pos", "ref_pts", "mem_bank", "mem_padding_mask"],
                                   opset_version=16)
                 
                 os.makedirs("calib_data", exist_ok=True)
                 calib_tarfile = tarfile.open(f"calib_data/data.tar", "w")
                 calib_data = {}
                 calib_data["cur_img"] = cur_img.numpy()
-                calib_data["mask"] = mask.numpy()
-                calib_data["ref_pts"] = np.random.rand(6, 256).astype(np.float32)
-                calib_data["mem_bank"] = np.random.rand(6, 4).astype(np.float32)
+                calib_data["ref_pts"] = np.random.rand(22, 4).astype(np.float32)
+                calib_data["query_pos"] = np.random.rand(22, 256).astype(np.float32)
                 np.save(f"calib_data/calib_data.npy", calib_data)
                 calib_tarfile.add(f"calib_data/calib_data.npy")
                 calib_tarfile.close()

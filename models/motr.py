@@ -774,33 +774,31 @@ class MOTR_ONNX(MOTR):
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
         return pos
     
-    def inference_single_image(self, img, mask, ori_img_size, query_pos, ref_pts, mem_bank, mem_padding_mask, proposals=None):
-        features, pos = self._backbone_forward(img, mask)
-        src, mask = features[-1]
-        assert mask is not None
+    def inference_single_image(self, img, query_pos, ref_pts, mem_bank, mem_padding_mask):
+        xs = self.backbone[0].body(img)
+        features = []
+        for name, x in sorted(xs.items()):
+            features.append(x)
+            
+        src = features[-1]
         
         srcs = []
-        masks = []
         for l, feat in enumerate(features):
-            src, mask = feat
+            src = feat
             srcs.append(self.input_proj[l](src))
-            masks.append(mask)
-            assert mask is not None
                                     
         if self.num_feature_levels > len(srcs):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.input_proj[l](features[-1][0])
+                    src = self.input_proj[l](features[-1])
                 else:
                     src = self.input_proj[l](srcs[-1])
-                m = mask
-                mask = F.interpolate(m[None].float(), size=src.shape[-2:]).to(torch.bool)[0]
-                pos_l = self._position_embedding_sine_forward(src, mask).to(src.dtype)
                 srcs.append(src)
-                masks.append(mask)
-                pos.append(pos_l)
-
+        
+        masks = getattr(self, "masks")
+        pos = getattr(self, "pos")
+        
         # gtboxes is None
         query_embed = query_pos
         ref_pts = ref_pts
