@@ -180,9 +180,10 @@ class QueryInteractionModulev2(QueryInteractionBase):
         active_track_instances = self._update_track_embedding(active_track_instances)
         return active_track_instances
     
-    def onnx_forward(self, pred_boxes, pred_logits, output_embedding, ref_pts, query_pos, obj_idxes, scores):
-        is_pos = scores > self.score_thr
-        ref_pts[is_pos] = pred_boxes.detach().clone()[is_pos]
+    def onnx_forward(self, pred_boxes, output_embedding, ref_pts, query_pos, scores):
+        # 改成torch.where写法，否则onnx会存在nonzero算子，pulsar2中不支持
+        is_pos = (scores > self.score_thr).reshape(-1, 1)
+        ref_pts = torch.where(is_pos, pred_boxes.detach().clone(), ref_pts)
         out_embed = output_embedding
         query_feat = query_pos
         query_pos = pos2posemb(ref_pts)
@@ -206,9 +207,9 @@ class QueryInteractionModulev2(QueryInteractionBase):
         query_feat2 = self.linear_feat2(self.dropout_feat1(self.activation(self.linear_feat1(tgt))))
         query_feat = query_feat + self.dropout_feat2(query_feat2)
         query_feat = self.norm_feat(query_feat)
-        query_pos[is_pos] = query_feat[is_pos]
+        query_pos = torch.where(is_pos, query_feat, query_pos)
 
-        return pred_boxes, pred_logits, output_embedding, ref_pts, query_pos, obj_idxes, scores
+        return output_embedding, query_pos
         
 def pos2posemb(pos, num_pos_feats=64, temperature=10000):
     scale = 2 * math.pi

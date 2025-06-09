@@ -181,11 +181,11 @@ class Detector(object):
                 np.save("yolox_embed.weight.npy", self.detr.yolox_embed.weight.detach().numpy())
                 
                 self.detr.forward = self.detr.inference_single_image
-                torch.onnx.export(self.detr, 
-                                  (cur_img, query_pos, ref_pts, mem_bank, mem_padding_mask),
-                                  "motrv2-no-mask-position.onnx", 
-                                  input_names=["cur_img", "query_pos", "ref_pts", "mem_bank", "mem_padding_mask"],
-                                  opset_version=16)
+                # torch.onnx.export(self.detr, 
+                #                   (cur_img, query_pos, ref_pts, mem_bank, mem_padding_mask),
+                #                   "motrv2-no-mask-position.onnx", 
+                #                   input_names=["cur_img", "query_pos", "ref_pts", "mem_bank", "mem_padding_mask"],
+                #                   opset_version=16)
                 
                 os.makedirs("calib_data/motrv2", exist_ok=True)
                 calib_tarfile = tarfile.open(f"calib_data/motrv2/data_motrv2.tar", "w")
@@ -198,20 +198,22 @@ class Detector(object):
                 calib_tarfile.close()
                 
                 #----- qim -----#
+                track_instances = track_instances[track_instances.obj_idxes >= 0]
+                
                 query_pos = track_instances.query_pos.cpu()
                 ref_pts = track_instances.ref_pts.cpu()
-                obj_idxes = track_instances.obj_idxes.cpu()
+                # obj_idxes = track_instances.obj_idxes.cpu()
                 scores = track_instances.scores.cpu()
                 output_embedding = track_instances.output_embedding.cpu()
                 pred_boxes = track_instances.pred_boxes.cpu()
-                pred_logits = track_instances.pred_logits.cpu()
+                # pred_logits = track_instances.pred_logits.cpu()
                 
                 self.detr.track_embed.forward = self.detr.track_embed.onnx_forward
                 torch.onnx.export(self.detr.track_embed,
-                                  (pred_boxes, pred_logits, output_embedding, ref_pts, query_pos, obj_idxes, scores),
+                                  (pred_boxes, output_embedding, ref_pts, query_pos, scores),
                                   "qim.onnx",
-                                  input_names=["pred_boxes", "pred_logits", "output_embedding", "ref_pts", "query_pos", "obj_idxes", "scores"],
-                                  output_names=["pred_boxes_", "pred_logits_", "output_embedding_", "ref_pts_", "query_pos_", "obj_idxes_", "scores_"],
+                                  input_names=["pred_boxes", "output_embedding", "ref_pts", "query_pos", "scores"],
+                                  output_names=["output_embedding_", "query_pos_"],
                                   opset_version=16
                 )
                 
@@ -219,11 +221,11 @@ class Detector(object):
                 calib_tarfile = tarfile.open(f"calib_data/qim/data_qim.tar", "w")
                 calib_data = {}
                 calib_data["pred_boxes"] = track_instances.pred_boxes.numpy()
-                calib_data["pred_logits"] = track_instances.pred_logits.numpy()
+                # calib_data["pred_logits"] = track_instances.pred_logits.numpy()
                 calib_data["output_embedding"] = track_instances.output_embedding.detach().numpy()
                 calib_data["ref_pts"] = track_instances.ref_pts.detach().numpy()
                 calib_data["query_pos"] = track_instances.query_pos.detach().numpy()
-                calib_data["obj_idxes"] = track_instances.obj_idxes.numpy()
+                # calib_data["obj_idxes"] = track_instances.obj_idxes.numpy()
                 calib_data["scores"] = track_instances.scores.numpy()
                 np.save(f"calib_data/qim/data_qim.npy", calib_data)
                 calib_tarfile.add(f"calib_data/qim/data_qim.npy")
