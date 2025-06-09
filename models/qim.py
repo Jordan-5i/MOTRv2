@@ -179,8 +179,37 @@ class QueryInteractionModulev2(QueryInteractionBase):
         active_track_instances = self._select_active_tracks(data)
         active_track_instances = self._update_track_embedding(active_track_instances)
         return active_track_instances
+    
+    def onnx_forward(self, pred_boxes, pred_logits, output_embedding, ref_pts, query_pos, obj_idxes, scores):
+        is_pos = scores > self.score_thr
+        ref_pts[is_pos] = pred_boxes.detach().clone()[is_pos]
+        out_embed = output_embedding
+        query_feat = query_pos
+        query_pos = pos2posemb(ref_pts)
+        q = k = query_pos + out_embed
+        
+        tgt = out_embed
+        tgt2 = self.self_attn(q[:, None], k[:, None], value=tgt[:, None])[0][:, 0]
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = self.norm1(tgt)
 
+        tgt2 = self.linear2(self.dropout(self.activation(self.linear1(tgt))))
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = self.norm2(tgt)
 
+        if self.update_query_pos:
+            query_pos2 = self.linear_pos2(self.dropout_pos1(self.activation(self.linear_pos1(tgt))))
+            query_pos = query_pos + self.dropout_pos2(query_pos2)
+            query_pos = self.norm_pos(query_pos)
+            
+
+        query_feat2 = self.linear_feat2(self.dropout_feat1(self.activation(self.linear_feat1(tgt))))
+        query_feat = query_feat + self.dropout_feat2(query_feat2)
+        query_feat = self.norm_feat(query_feat)
+        query_pos[is_pos] = query_feat[is_pos]
+
+        return pred_boxes, pred_logits, output_embedding, ref_pts, query_pos, obj_idxes, scores
+        
 def pos2posemb(pos, num_pos_feats=64, temperature=10000):
     scale = 2 * math.pi
     pos = pos * scale
