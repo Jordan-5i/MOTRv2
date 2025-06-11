@@ -1,46 +1,26 @@
-from copy import deepcopy
-import json
-import sys
-
-sys.path.append(".")
-
-import os
-import math
 import argparse
-import torchvision.transforms.functional as F
-import torch
+import os
+from copy import deepcopy
+import re
+import sys
+import time
 import cv2
-import tarfile
-import numpy as np
-import onnxruntime
+import math
+import glob
+import json
+import torch
 from torch import nn
 from tqdm import tqdm
-from pathlib import Path
-from models import build_model
-from util.tool import load_model
-from main import get_args_parser
-
-from models.structures import Instances
+import torchvision.transforms.functional as F
+import numpy as np
 from torch.utils.data import Dataset, DataLoader
-from util.misc import nested_tensor_from_tensor_list
 
-
-def pos2posemb(pos, num_pos_feats=64, temperature=10000):
-    scale = 2 * math.pi
-    pos = pos * scale
-    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
-    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
-    posemb = pos[..., None] / dim_t
-    posemb = torch.stack(
-        (posemb[..., 0::2].sin(), posemb[..., 1::2].cos()), dim=-1
-    ).flatten(-3)
-    return posemb
-
-
-def box_cxcywh_to_xyxy(x):
-    x_c, y_c, w, h = x.unbind(-1)
-    b = [(x_c - 0.5 * w), (y_c - 0.5 * h), (x_c + 0.5 * w), (y_c + 0.5 * h)]
-    return torch.stack(b, dim=-1)
+try:
+    from models.structures import Instances
+except ImportError:
+    from instances import Instances
+import axengine as axe
+from axengine import axclrt_provider_name, axengine_provider_name
 
 
 class ListImgDataset(Dataset):
@@ -90,6 +70,45 @@ class ListImgDataset(Dataset):
     def __getitem__(self, index):
         img, proposals = self.load_img_from_file(self.img_list[index])
         return self.init_img(img, proposals)
+
+
+def load_model(
+    model_path: str | os.PathLike, selected_provider: str, selected_device_id: int = 0
+):
+    if selected_provider == "AUTO":
+        # Use AUTO to let the pyengine choose the first available provider
+        return axe.InferenceSession(model_path)
+
+    providers = []
+    if selected_provider == axclrt_provider_name:
+        provider_options = {"device_id": selected_device_id}
+        providers.append((axclrt_provider_name, provider_options))
+    if selected_provider == axengine_provider_name:
+        providers.append(axengine_provider_name)
+
+    return axe.InferenceSession(model_path, providers=providers)
+
+
+def pos2posemb(pos, num_pos_feats=64, temperature=10000):
+    scale = 2 * math.pi
+    pos = pos * scale
+    dim_t = torch.arange(num_pos_feats, dtype=torch.float32, device=pos.device)
+    dim_t = temperature ** (2 * (dim_t // 2) / num_pos_feats)
+    posemb = pos[..., None] / dim_t
+    posemb = torch.stack(
+        (posemb[..., 0::2].sin(), posemb[..., 1::2].cos()), dim=-1
+    ).flatten(-3)
+    return posemb
+
+
+def box_cxcywh_to_xyxy(x):
+    x_c, y_c, w, h = x.unbind(-1)
+    b = [(x_c - 0.5 * w), (y_c - 0.5 * h), (x_c + 0.5 * w), (y_c + 0.5 * h)]
+    return torch.stack(b, dim=-1)
+
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
 
 class RuntimeTrackerBase(object):
@@ -172,13 +191,6 @@ class Detector(object):
         self.track_base = RuntimeTrackerBase()
         self.post_process = TrackerPostProcess()  # 把输出结果还原回原图大小
         self.memory_bank = None
-        
-        os.makedirs("calib_data/motrv2", exist_ok=True)
-        os.makedirs("calib_data/qim", exist_ok=True)
-        self.calib_tarfile_motr = tarfile.open(
-            f"calib_data/motrv2/data_motrv2.tar", "w"
-        )
-        self.calib_tarfile_qim = tarfile.open(f"calib_data/qim/data_qim.tar", "w")
 
         self.vid = vid
         self.seq_num = os.path.basename(vid)
@@ -265,7 +277,7 @@ class Detector(object):
 
         return track_instances
 
-    def _post_process_single_image(self, frame_res, track_instances, is_last, frame_id):
+    def _post_process_single_image(self, frame_res, track_instances, is_last):
         track_scores = frame_res["pred_logits"][0, :, 0].sigmoid()
 
         track_instances.scores = track_scores
@@ -289,20 +301,6 @@ class Detector(object):
                 "query_pos": track_instances.query_pos.numpy(),
                 "scores": track_instances.scores.numpy(),
             }
-            # -------------------------------------- #
-            if frame_id < 20:
-                calib_data = {}
-                calib_data["pred_boxes"] = track_instances.pred_boxes.numpy()
-                calib_data[
-                    "output_embedding"
-                ] = track_instances.output_embedding.detach().numpy()
-                calib_data["ref_pts"] = track_instances.ref_pts.detach().numpy()
-                calib_data["query_pos"] = track_instances.query_pos.detach().numpy()
-                calib_data["scores"] = track_instances.scores.numpy()
-                np.save(f"calib_data/qim/data_qim_{frame_id}.npy", calib_data)
-                self.calib_tarfile_qim.add(f"calib_data/qim/data_qim_{frame_id}.npy")
-            # -------------------------------------- #
-
             output_embedding, query_pos = self.track_embed.run(None, inputs)
 
             track_instances.query_pos = torch.from_numpy(query_pos)
@@ -312,7 +310,6 @@ class Detector(object):
             frame_res["track_instances"] = None
         return frame_res
 
-    @torch.no_grad()
     def detect(self, prob_threshold=0.6, area_threshold=100, vis=False):
         total_dts = 0
         total_occlusion_dts = 0
@@ -359,22 +356,10 @@ class Detector(object):
                     "pred_boxes": torch.from_numpy(res[1]),  # (1, 22, 4)
                     "hs": torch.from_numpy(res[-1]),  # (1, 22, 256)
                 }
-                # ------------------------------------- #
-                if i < 20:
-                    calib_data = {}
-                    calib_data["cur_img"] = cur_img.numpy()
-                    calib_data["ref_pts"] = track_instances.ref_pts.numpy()
-                    calib_data["query_pos"] = track_instances.query_pos.numpy()
-                    np.save(f"calib_data/motrv2/data_motrv2_{i}.npy", calib_data)
-                    self.calib_tarfile_motr.add(
-                        f"calib_data/motrv2/data_motrv2_{i}.npy"
-                    )
-                # ------------------------------------- #
-
                 # 对应 MOTR._post_process_single_image()
                 is_last = False
                 frame_res = self._post_process_single_image(
-                    frame_res, track_instances, is_last, i
+                    frame_res, track_instances, is_last
                 )
 
                 track_instances = frame_res["track_instances"]
@@ -412,10 +397,6 @@ class Detector(object):
                             frame=i + 1, id=track_id, x1=x1, y1=y1, w=w, h=h
                         )
                     )
-
-            self.calib_tarfile_motr.close()
-            self.calib_tarfile_qim.close()
-
             with open(os.path.join(self.predict_path, f"{self.seq_num}.txt"), "w") as f:
                 f.writelines(lines)
             print(
@@ -423,9 +404,6 @@ class Detector(object):
             )
         except Exception as e:
             print(e)
-            self.calib_tarfile_motr.close()
-            self.calib_tarfile_qim.close()
-
             with open(os.path.join(self.predict_path, f"{self.seq_num}.txt"), "w") as f:
                 f.writelines(lines)
             print(
@@ -434,7 +412,6 @@ class Detector(object):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser("run axmodel")
     parser.add_argument("--score_threshold", default=0.5, type=float)
     parser.add_argument("--update_score_threshold", default=0.5, type=float)
@@ -442,14 +419,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     args.output_dir = "."
-    args.mot_path = "/data/wangjian/project/hf_cache"
-    args.exp_name = "onnx_output"
-    args.det_db = "/data/wangjian/project/hf_cache/DanceTrack/det_db_motrv2.json"
+    args.mot_path = "."
+    args.exp_name = "axmodel_output"
+    args.det_db = "det_db_motrv2.json"
 
-    motr_model_path = "motrv2-no-mask-position-sim.onnx"
-    qim_model_path = "qim-sim.onnx"
-    motr_model = onnxruntime.InferenceSession(motr_model_path)
-    qim_model = onnxruntime.InferenceSession(qim_model_path)
+    motr_model_path = "motr-complied.axmodel"
+    qim_model_path = "qim-complied.axmodel"
+    motr_axmodel = load_model(motr_model_path, selected_provider="AUTO")
+    qim_axmodel = load_model(qim_model_path, selected_provider="AUTO")
 
     # '''for MOT17 submit'''
     sub_dir = "DanceTrack/test"
@@ -459,5 +436,5 @@ if __name__ == "__main__":
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]
 
     for vid in vids:
-        det = Detector(args, model=motr_model, track_embed=qim_model, vid=vid)
+        det = Detector(args, model=motr_axmodel, track_embed=qim_axmodel, vid=vid)
         det.detect(args.score_threshold)
