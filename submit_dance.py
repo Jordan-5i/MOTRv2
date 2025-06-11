@@ -198,6 +198,7 @@ if __name__ == '__main__':
     # '''for MOT17 submit''' 
     sub_dir = 'DanceTrack/test'
     seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))
+    seq_nums.sort()
     if 'seqmap' in seq_nums:
         seq_nums.remove('seqmap')
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]
