@@ -85,6 +85,12 @@ python run_axmodel.py
 ```
 即可在当前目录中生成axmodel_output目录，板端运行结果保存在此目录中。
 
+把板端结果scp会本地后，可视化推理结果，执行脚本：
+```bash 
+python tools/visualize.py
+```
+可视化结果如：https://github.com/Jordan-5i/MOTRv2/blob/main/dancetrack0011.mp4
+
 ```bash
 scp output_motr/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/motr-complied.axmodel
 
