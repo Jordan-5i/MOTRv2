@@ -62,6 +62,13 @@ pulsar2 build --input qim-sim.onnx --config config_qim.json --output_dir output_
 - `position.weight.npy, query_embed.weight.npy, yolox_embed.weight.npy` 3个axmodel输入需要用到的权重文件
 - `models/structures/instances.py`，`tools/run_axmodel.py`
 
+```bash
+# 分别把2个compiled.axmodel重命名
+scp output_motr/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/motr-complied.axmodel
+
+scp output_qim/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/qim-complied.axmodel
+```
+
 板子上的目录结构如下：
 ```bash
 /root/wangjian/motrv2
@@ -91,8 +98,3 @@ python tools/visualize.py
 ```
 可视化结果如：https://github.com/Jordan-5i/MOTRv2/blob/main/dancetrack0011.mp4
 
-```bash
-scp output_motr/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/motr-complied.axmodel
-
-scp output_qim/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/qim-complied.axmodel
-```
