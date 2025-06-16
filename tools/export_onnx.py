@@ -19,7 +19,7 @@ from main import get_args_parser
 
 from models.structures import Instances
 from torch.utils.data import Dataset, DataLoader
-from util.misc import nested_tensor_from_tensor_list
+from util.misc import nested_tensor_from_tensor_list, NestedTensor
 
 
 class ListImgDataset(Dataset):
@@ -101,14 +101,14 @@ class Detector(object):
         return dt_instances[keep]
 
     @torch.no_grad()
-    def prepare_mask_pos_encoding(self, img, mask):
-        features, pos = self.detr._backbone_forward(img, mask)
-        src, mask = features[-1]
+    def prepare_mask_pos_encoding(self, samples):
+        features, pos = self.detr.backbone(samples)
+        src, mask = features[-1].decompose()
 
         srcs = []
         masks = []
         for l, feat in enumerate(features):
-            src, mask = feat
+            src, mask = feat.decompose()
             srcs.append(self.detr.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
@@ -117,16 +117,14 @@ class Detector(object):
             _len_srcs = len(srcs)
             for l in range(_len_srcs, self.detr.num_feature_levels):
                 if l == _len_srcs:
-                    src = self.detr.input_proj[l](features[-1][0])
+                    src = self.detr.input_proj[l](features[-1].tensors)
                 else:
-                    src = self.input_proj[l](srcs[-1])
-                m = mask
+                    src = self.detr.input_proj[l](srcs[-1])
+                m = samples.mask
                 mask = torch.nn.functional.interpolate(
                     m[None].float(), size=src.shape[-2:]
                 ).to(torch.bool)[0]
-                pos_l = self.detr._position_embedding_sine_forward(src, mask).to(
-                    src.dtype
-                )
+                pos_l = self.detr.backbone[1](NestedTensor(src, mask)).to(src.dtype)
                 srcs.append(src)
                 masks.append(mask)
                 pos.append(pos_l)
@@ -177,10 +175,10 @@ class Detector(object):
                     )
                 query_pos = track_instances_onnx.query_pos.cpu()
                 ref_pts = track_instances_onnx.ref_pts.cpu()
-                mask = nested_tensor_from_tensor_list(cur_img).mask
+                samples = nested_tensor_from_tensor_list(cur_img)
 
                 # 预计算位置编码，和masks中有效比例
-                masks, pos = self.prepare_mask_pos_encoding(cur_img, mask)
+                masks, pos = self.prepare_mask_pos_encoding(samples)
                 valid_ratios = torch.stack(
                     [self.detr.transformer.get_valid_ratio(m) for m in masks], 1
                 )
