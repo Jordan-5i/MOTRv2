@@ -58,7 +58,7 @@ def process(mot_path, trk_path, img_list, output="output.mp4"):
 
 if __name__ == '__main__':
     # 模型输出的结果目录
-    output_txt_path = "/data/wangjian/project/MOTRv2/submit"
+    output_txt_path = "/data/wangjian/project/MOTRv2/onnx_output"
     jobs = os.listdir(output_txt_path)
     jobs.sort()
     # jobs = jobs[:1]
@@ -76,5 +76,5 @@ if __name__ == '__main__':
         
         img_list = os.listdir(os.path.join(mot_path, sub_dir, f"{seq[:-4]}/img1/"))
         img_list = [os.path.join(sub_dir, f"{seq[:-4]}/img1/", p) for p in img_list]  
-        process(mot_path, trk_path, img_list, f'{seq[:-4]}.mp4')
+        process(mot_path, trk_path, img_list, os.path.join(output_txt_path, f'{seq[:-4]}.mp4'))
         # break

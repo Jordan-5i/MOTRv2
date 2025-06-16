@@ -780,7 +780,7 @@ class MOTR_ONNX(MOTR):
         for name, x in sorted(xs.items()):
             features.append(x)
             
-        src = features[-1]
+        # src = features[-1]
         
         srcs = []
         for l, feat in enumerate(features):
@@ -804,6 +804,7 @@ class MOTR_ONNX(MOTR):
         ref_pts = ref_pts
         attn_mask = None
         
+        # hs: (6, 1, 22, 256), init_reference: (1, 22, 4), inter_references: (6, 1, 22, 4)
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = \
             self.transformer(srcs, masks, pos, query_embed, ref_pts=ref_pts,
                              mem_bank=mem_bank, mem_bank_pad_mask=mem_padding_mask, attn_mask=attn_mask)

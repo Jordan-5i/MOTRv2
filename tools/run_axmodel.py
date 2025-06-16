@@ -188,10 +188,11 @@ class Detector(object):
         self.num_classes = 1
         self.detr = model
         self.track_embed = track_embed  # QIMv2 模块
-        self.track_base = RuntimeTrackerBase()
+        self.track_base = RuntimeTrackerBase(args.score_threshold, args.score_threshold, args.miss_tolerance)
         self.post_process = TrackerPostProcess()  # 把输出结果还原回原图大小
         self.memory_bank = None
-
+        self.query_denoise = 0.05
+        
         self.vid = vid
         self.seq_num = os.path.basename(vid)
         img_list = os.listdir(os.path.join(self.args.mot_path, vid, "img1"))
@@ -278,6 +279,23 @@ class Detector(object):
         return track_instances
 
     def _post_process_single_image(self, frame_res, track_instances, is_last):
+        if self.query_denoise > 0:
+            n_ins = len(track_instances)
+            ps_logits = frame_res['pred_logits'][:, n_ins:]
+            ps_boxes = frame_res['pred_boxes'][:, n_ins:]
+            frame_res['hs'] = frame_res['hs'][:, :n_ins]
+            frame_res['pred_logits'] = frame_res['pred_logits'][:, :n_ins]
+            frame_res['pred_boxes'] = frame_res['pred_boxes'][:, :n_ins]
+            ps_outputs = [{'pred_logits': ps_logits, 'pred_boxes': ps_boxes}]
+            for aux_outputs in frame_res['aux_outputs']:
+                ps_outputs.append({
+                    'pred_logits': aux_outputs['pred_logits'][:, n_ins:],
+                    'pred_boxes': aux_outputs['pred_boxes'][:, n_ins:],
+                })
+                aux_outputs['pred_logits'] = aux_outputs['pred_logits'][:, :n_ins]
+                aux_outputs['pred_boxes'] = aux_outputs['pred_boxes'][:, :n_ins]
+            frame_res['ps_outputs'] = ps_outputs
+            
         track_scores = frame_res["pred_logits"][0, :, 0].sigmoid()
 
         track_instances.scores = track_scores
@@ -355,6 +373,7 @@ class Detector(object):
                     "pred_logits": torch.from_numpy(res[0]),  # (1, 22, 1), 只有人一个类别
                     "pred_boxes": torch.from_numpy(res[1]),  # (1, 22, 4)
                     "hs": torch.from_numpy(res[-1]),  # (1, 22, 256)
+                    "aux_outputs": [{'pred_logits': res[i], 'pred_boxes': res[i+1]} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
                 }
                 # 对应 MOTR._post_process_single_image()
                 is_last = False

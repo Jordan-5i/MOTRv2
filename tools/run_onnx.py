@@ -169,9 +169,10 @@ class Detector(object):
         self.num_classes = 1
         self.detr = model
         self.track_embed = track_embed  # QIMv2 模块
-        self.track_base = RuntimeTrackerBase()
+        self.track_base = RuntimeTrackerBase(args.score_threshold, args.score_threshold, args.miss_tolerance) # 对应submit_dance.py中args设置的默认值
         self.post_process = TrackerPostProcess()  # 把输出结果还原回原图大小
         self.memory_bank = None
+        self.query_denoise = 0.05
         
         os.makedirs("calib_data/motrv2", exist_ok=True)
         os.makedirs("calib_data/qim", exist_ok=True)
@@ -266,6 +267,23 @@ class Detector(object):
         return track_instances
 
     def _post_process_single_image(self, frame_res, track_instances, is_last, frame_id):
+        if self.query_denoise > 0:
+            n_ins = len(track_instances)
+            ps_logits = frame_res['pred_logits'][:, n_ins:]
+            ps_boxes = frame_res['pred_boxes'][:, n_ins:]
+            frame_res['hs'] = frame_res['hs'][:, :n_ins]
+            frame_res['pred_logits'] = frame_res['pred_logits'][:, :n_ins]
+            frame_res['pred_boxes'] = frame_res['pred_boxes'][:, :n_ins]
+            ps_outputs = [{'pred_logits': ps_logits, 'pred_boxes': ps_boxes}]
+            for aux_outputs in frame_res['aux_outputs']:
+                ps_outputs.append({
+                    'pred_logits': aux_outputs['pred_logits'][:, n_ins:],
+                    'pred_boxes': aux_outputs['pred_boxes'][:, n_ins:],
+                })
+                aux_outputs['pred_logits'] = aux_outputs['pred_logits'][:, :n_ins]
+                aux_outputs['pred_boxes'] = aux_outputs['pred_boxes'][:, :n_ins]
+            frame_res['ps_outputs'] = ps_outputs
+            
         track_scores = frame_res["pred_logits"][0, :, 0].sigmoid()
 
         track_instances.scores = track_scores
@@ -337,10 +355,6 @@ class Detector(object):
 
                 if track_instances is None:
                     track_instances = self._generate_empty_tracks(proposals)
-                    # 为了适配axmodel输入为22
-                    track_instances = Instances.cat(
-                        [track_instances[:6], track_instances]
-                    )
                 else:
                     track_instances = Instances.cat(
                         [self._generate_empty_tracks(proposals), track_instances]
@@ -355,10 +369,13 @@ class Detector(object):
                 res = self.detr.run(None, inputs)
 
                 frame_res = {
-                    "pred_logits": torch.from_numpy(res[0]),  # (1, 22, 1), 只有人一个类别
+                    "pred_logits": torch.from_numpy(res[0]),  # (1, 22, 1), 只有人一个类别，第6个layer的输出
                     "pred_boxes": torch.from_numpy(res[1]),  # (1, 22, 4)
                     "hs": torch.from_numpy(res[-1]),  # (1, 22, 256)
+                    "aux_outputs": [{'pred_logits': res[i], 'pred_boxes': res[i+1]} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
                 }
+                
+                print(frame_res["pred_logits"].view(-1).sigmoid())
                 # ------------------------------------- #
                 if i < 20:
                     calib_data = {}
@@ -421,7 +438,7 @@ class Detector(object):
             print(
                 "totally {} dts {} occlusion dts".format(total_dts, total_occlusion_dts)
             )
-        except Exception as e:
+        except (Exception, KeyboardInterrupt) as e:
             print(e)
             self.calib_tarfile_motr.close()
             self.calib_tarfile_qim.close()
@@ -446,14 +463,15 @@ if __name__ == "__main__":
     args.exp_name = "onnx_output"
     args.det_db = "/data/wangjian/project/hf_cache/DanceTrack/det_db_motrv2.json"
 
-    motr_model_path = "motrv2-no-mask-position-sim.onnx"
-    qim_model_path = "qim-sim.onnx"
+    motr_model_path = "motrv2-no-mask-position-dynamic-sim.onnx"
+    qim_model_path = "qim-dynamic-sim.onnx"
     motr_model = onnxruntime.InferenceSession(motr_model_path)
     qim_model = onnxruntime.InferenceSession(qim_model_path)
 
     # '''for MOT17 submit'''
     sub_dir = "DanceTrack/test"
-    seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
+    # seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
+    seq_nums = ["dancetrack0064"]
     if "seqmap" in seq_nums:
         seq_nums.remove("seqmap")
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]

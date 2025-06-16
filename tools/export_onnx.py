@@ -155,28 +155,30 @@ class Detector(object):
                 track_instances.remove("labels")
             seq_h, seq_w, _ = ori_img.shape
 
+            track_instances_onnx = deepcopy(track_instances)
+            
             ori_detr = self.detr.__class__.__bases__[0]
             res = ori_detr.inference_single_image(
                 self.detr, cur_img, (seq_h, seq_w), track_instances, proposals
             )
             track_instances = res["track_instances"]
 
-            if i > 50:
+            if i+1 == -1:
                 cur_img, proposals = cur_img.cpu(), proposals.cpu()
                 self.detr.cpu()
-                if track_instances is None:
-                    track_instances = self.detr._generate_empty_tracks(proposals)
+                if track_instances_onnx is None:
+                    track_instances_onnx = self.detr._generate_empty_tracks(proposals)
                 else:
-                    track_instances = Instances.cat(
+                    track_instances_onnx = Instances.cat(
                         [
                             self.detr._generate_empty_tracks(proposals),
-                            track_instances.to("cpu"),
+                            track_instances_onnx.to("cpu"),
                         ]
                     )
-                query_pos = track_instances.query_pos.cpu()
-                ref_pts = track_instances.ref_pts.cpu()
-                mem_bank = track_instances.mem_bank.cpu()
-                mem_padding_mask = track_instances.mem_padding_mask.cpu()
+                query_pos = track_instances_onnx.query_pos.cpu()
+                ref_pts = track_instances_onnx.ref_pts.cpu()
+                mem_bank = track_instances_onnx.mem_bank.cpu()
+                mem_padding_mask = track_instances_onnx.mem_padding_mask.cpu()
                 mask = nested_tensor_from_tensor_list(cur_img).mask
 
                 # 预计算位置编码，和masks中有效比例
@@ -203,10 +205,14 @@ class Detector(object):
                 )
 
                 self.detr.forward = self.detr.inference_single_image
+                dynamic_axes = {
+                    'query_pos': {0: 'num_queries'},  # 22 -> 动态
+                    'ref_pts': {0: 'num_queries'}     # 22 -> 动态
+                }
                 torch.onnx.export(
                     self.detr,
                     (cur_img, query_pos, ref_pts, mem_bank, mem_padding_mask),
-                    "motrv2-no-mask-position.onnx",
+                    "motrv2-no-mask-position-dynamic.onnx",
                     input_names=[
                         "cur_img",
                         "query_pos",
@@ -214,6 +220,7 @@ class Detector(object):
                         "mem_bank",
                         "mem_padding_mask",
                     ],
+                    dynamic_axes=dynamic_axes,
                     opset_version=16,
                 )
 
@@ -227,10 +234,17 @@ class Detector(object):
                 pred_boxes = track_instances.pred_boxes.cpu()
 
                 self.detr.track_embed.forward = self.detr.track_embed.onnx_forward
+                dynamic_axes = {
+                    'pred_boxes': {0: 'num_queries'},
+                    'output_embedding': {0: 'num_queries'},
+                    'query_pos': {0: 'num_queries'},  # 22 -> 动态
+                    'ref_pts': {0: 'num_queries'},     # 22 -> 动态
+                    'scores': {0: 'num_queries'},
+                }
                 torch.onnx.export(
                     self.detr.track_embed,
                     (pred_boxes, output_embedding, ref_pts, query_pos, scores),
-                    "qim.onnx",
+                    "qim-dynamic.onnx",
                     input_names=[
                         "pred_boxes",
                         "output_embedding",
@@ -239,6 +253,7 @@ class Detector(object):
                         "scores",
                     ],
                     output_names=["output_embedding_", "query_pos_"],
+                    dynamic_axes=dynamic_axes,
                     opset_version=16,
                 )
 
@@ -352,9 +367,8 @@ if __name__ == "__main__":
 
     # '''for MOT17 submit'''
     sub_dir = "DanceTrack/test"
-    seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))
-    seq_nums.sort()
-    seq_nums = seq_nums[:1]
+    # seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
+    seq_nums = ["dancetrack0064"]
     if "seqmap" in seq_nums:
         seq_nums.remove("seqmap")
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]
