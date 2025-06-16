@@ -185,7 +185,8 @@ class QueryInteractionModulev2(QueryInteractionBase):
         is_pos = (scores > self.score_thr).reshape(-1, 1)
         ref_pts = torch.where(is_pos, pred_boxes.detach().clone(), ref_pts)
         out_embed = output_embedding
-        query_feat = query_pos
+        query_pos_clone = query_pos.clone()
+        query_feat = query_pos_clone
         query_pos = pos2posemb(ref_pts)
         q = k = query_pos + out_embed
         
@@ -201,15 +202,15 @@ class QueryInteractionModulev2(QueryInteractionBase):
         if self.update_query_pos:
             query_pos2 = self.linear_pos2(self.dropout_pos1(self.activation(self.linear_pos1(tgt))))
             query_pos = query_pos + self.dropout_pos2(query_pos2)
-            query_pos = self.norm_pos(query_pos)
+            query_pos_clone = self.norm_pos(query_pos)
             
 
         query_feat2 = self.linear_feat2(self.dropout_feat1(self.activation(self.linear_feat1(tgt))))
         query_feat = query_feat + self.dropout_feat2(query_feat2)
         query_feat = self.norm_feat(query_feat)
-        query_pos = torch.where(is_pos, query_feat, query_pos)
+        query_pos_clone = torch.where(is_pos, query_feat, query_pos_clone)
 
-        return output_embedding, query_pos
+        return output_embedding, query_pos_clone
         
 def pos2posemb(pos, num_pos_feats=64, temperature=10000):
     scale = 2 * math.pi
