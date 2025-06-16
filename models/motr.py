@@ -774,7 +774,7 @@ class MOTR_ONNX(MOTR):
         pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
         return pos
     
-    def inference_single_image(self, img, query_pos, ref_pts, mem_bank, mem_padding_mask):
+    def inference_single_image(self, img, query_pos, ref_pts):
         xs = self.backbone[0].body(img)
         features = []
         for name, x in sorted(xs.items()):
@@ -807,7 +807,7 @@ class MOTR_ONNX(MOTR):
         # hs: (6, 1, 22, 256), init_reference: (1, 22, 4), inter_references: (6, 1, 22, 4)
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = \
             self.transformer(srcs, masks, pos, query_embed, ref_pts=ref_pts,
-                             mem_bank=mem_bank, mem_bank_pad_mask=mem_padding_mask, attn_mask=attn_mask)
+                             mem_bank=None, mem_bank_pad_mask=None, attn_mask=attn_mask)
         
         outputs_classes = []
         outputs_coords = []

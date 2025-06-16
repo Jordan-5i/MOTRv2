@@ -163,7 +163,7 @@ class Detector(object):
             )
             track_instances = res["track_instances"]
 
-            if i+1 == -1:
+            if i > 20:
                 cur_img, proposals = cur_img.cpu(), proposals.cpu()
                 self.detr.cpu()
                 if track_instances_onnx is None:
@@ -177,8 +177,6 @@ class Detector(object):
                     )
                 query_pos = track_instances_onnx.query_pos.cpu()
                 ref_pts = track_instances_onnx.ref_pts.cpu()
-                mem_bank = track_instances_onnx.mem_bank.cpu()
-                mem_padding_mask = track_instances_onnx.mem_padding_mask.cpu()
                 mask = nested_tensor_from_tensor_list(cur_img).mask
 
                 # 预计算位置编码，和masks中有效比例
@@ -211,14 +209,12 @@ class Detector(object):
                 }
                 torch.onnx.export(
                     self.detr,
-                    (cur_img, query_pos, ref_pts, mem_bank, mem_padding_mask),
+                    (cur_img, query_pos, ref_pts),
                     "motrv2-no-mask-position-dynamic.onnx",
                     input_names=[
                         "cur_img",
                         "query_pos",
                         "ref_pts",
-                        "mem_bank",
-                        "mem_padding_mask",
                     ],
                     dynamic_axes=dynamic_axes,
                     opset_version=16,
