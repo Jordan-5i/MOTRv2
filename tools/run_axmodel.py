@@ -319,10 +319,10 @@ class Detector(object):
                 "query_pos": track_instances.query_pos.numpy(),
                 "scores": track_instances.scores.numpy(),
             }
-            output_embedding, query_pos = self.track_embed.run(None, inputs)
+            ref_pts, query_pos = self.track_embed.run(None, inputs)
 
             track_instances.query_pos = torch.from_numpy(query_pos)
-            track_instances.output_embedding = torch.from_numpy(output_embedding)
+            track_instances.ref_pts = torch.from_numpy(ref_pts)
             frame_res["track_instances"] = track_instances
         else:
             frame_res["track_instances"] = None
@@ -373,7 +373,7 @@ class Detector(object):
                     "pred_logits": torch.from_numpy(res[0]),  # (1, 22, 1), 只有人一个类别
                     "pred_boxes": torch.from_numpy(res[1]),  # (1, 22, 4)
                     "hs": torch.from_numpy(res[-1]),  # (1, 22, 256)
-                    "aux_outputs": [{'pred_logits': res[i], 'pred_boxes': res[i+1]} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
+                    "aux_outputs": [{'pred_logits': torch.from_numpy(res[i]), 'pred_boxes': torch.from_numpy(res[i+1])} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
                 }
                 # 对应 MOTR._post_process_single_image()
                 is_last = False
