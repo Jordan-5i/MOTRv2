@@ -587,7 +587,7 @@ class MOTR(nn.Module):
                 track_scores = frame_res['pred_logits'][0, :].sigmoid().max(dim=-1).values
             else:
                 track_scores = frame_res['pred_logits'][0, :, 0].sigmoid()
-
+        print(frame_res['pred_logits'][0, :, 0])
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res['pred_logits'][0]
         track_instances.pred_boxes = frame_res['pred_boxes'][0]
@@ -709,79 +709,13 @@ class MOTR(nn.Module):
 class MOTR_ONNX(MOTR):
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed, aux_loss=True, with_box_refine=False, two_stage=False, memory_bank=None, use_checkpoint=False, query_denoise=0):
         super().__init__(backbone, transformer, num_classes, num_queries, num_feature_levels, criterion, track_embed, aux_loss, with_box_refine, two_stage, memory_bank, use_checkpoint, query_denoise)
-
-    def _generate_empty_tracks_my(self, proposals=None):
-        num_queries, d_model = self.query_embed.weight.shape  # (300, 512)
-        device = self.query_embed.weight.device
-        if proposals is None:
-            ref_pts = self.position.weight
-            query_pos = self.query_embed.weight
-        else:
-            ref_pts = torch.cat([self.position.weight, proposals[:, :4]])
-            query_pos = torch.cat([self.query_embed.weight, pos2posemb(proposals[:, 4:], d_model) + self.yolox_embed.weight])
-        output_embedding = torch.zeros((16, d_model), device=device)
-        obj_idxes = torch.full((16,), -1, dtype=torch.long, device=device)
-        matched_gt_idxes = torch.full((16,), -1, dtype=torch.long, device=device)
-        disappear_time = torch.zeros((16, ), dtype=torch.long, device=device)
-        iou = torch.ones((16,), dtype=torch.float, device=device)
-        scores = torch.zeros((16,), dtype=torch.float, device=device)
-        track_scores = torch.zeros((16,), dtype=torch.float, device=device)
-        pred_boxes = torch.zeros((16, 4), dtype=torch.float, device=device)
-        pred_logits = torch.zeros((16, self.num_classes), dtype=torch.float, device=device)
-
-        mem_bank_len = self.mem_bank_len
-        mem_bank = torch.zeros((16, mem_bank_len, d_model), dtype=torch.float32, device=device)
-        mem_padding_mask = torch.ones((16, mem_bank_len), dtype=torch.bool, device=device)
-        save_period = torch.zeros((16, ), dtype=torch.float32, device=device)
-
-        return query_pos, ref_pts, mem_bank, mem_padding_mask
-        
-    def _backbone_forward(self, img, mask):
-        # 这里的backbone是一个Joiner类，里面有backbone和position_embedding两个部分
-        xs = self.backbone[0].body(img)
-        out = []
-        pos = []
-        for name, x in sorted(xs.items()):
-            m = mask.clone()
-            assert m is not None
-            m = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
-            out.append((x, m))
-        
-        # position encoding
-        for x in out:
-            pos.append(self._position_embedding_sine_forward(x[0], x[1]).to(x[0].dtype))
-        
-        return out, pos
-    
-    def _position_embedding_sine_forward(self, img, mask):
-        x = img
-        assert mask is not None
-        not_mask = ~mask
-        y_embed = not_mask.cumsum(1, dtype=torch.float32)
-        x_embed = not_mask.cumsum(2, dtype=torch.float32)
-        if self.backbone[1].normalize:
-            eps = 1e-6
-            y_embed = (y_embed - 0.5) / (y_embed[:, -1:, :] + eps) * self.backbone[1].scale
-            x_embed = (x_embed - 0.5) / (x_embed[:, :, -1:] + eps) * self.backbone[1].scale
-
-        dim_t = torch.arange(self.backbone[1].num_pos_feats, dtype=torch.float32, device=x.device)
-        dim_t = self.backbone[1].temperature ** (2 * (dim_t // 2) / self.backbone[1].num_pos_feats)
-
-        pos_x = x_embed[:, :, :, None] / dim_t
-        pos_y = y_embed[:, :, :, None] / dim_t
-        pos_x = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        pos_y = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
-        pos = torch.cat((pos_y, pos_x), dim=3).permute(0, 3, 1, 2)
-        return pos
-    
-    def inference_single_image(self, img, query_pos, ref_pts):
+ 
+    def _onnx_forward_single_image(self, img, query_pos, ref_pts):
         xs = self.backbone[0].body(img)
         features = []
         for name, x in sorted(xs.items()):
             features.append(x)
             
-        # src = features[-1]
-        
         srcs = []
         for l, feat in enumerate(features):
             src = feat

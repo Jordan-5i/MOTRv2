@@ -101,7 +101,7 @@ class Detector(object):
         return dt_instances[keep]
 
     @torch.no_grad()
-    def prepare_mask_pos_encoding(self, samples):
+    def prepare_mask_pos_encoding(self, samples: NestedTensor):
         features, pos = self.detr.backbone(samples)
         src, mask = features[-1].decompose()
 
@@ -200,7 +200,7 @@ class Detector(object):
                     self.detr.yolox_embed.weight.detach().numpy(),
                 )
 
-                self.detr.forward = self.detr.inference_single_image
+                self.detr.forward = self.detr._onnx_forward_single_image
                 dynamic_axes = {
                     'query_pos': {0: 'num_queries'},  # 22 -> 动态
                     'ref_pts': {0: 'num_queries'}     # 22 -> 动态

@@ -372,7 +372,7 @@ class Detector(object):
                     "pred_logits": torch.from_numpy(res[0]),  # (1, 22, 1), 只有人一个类别，第6个layer的输出
                     "pred_boxes": torch.from_numpy(res[1]),  # (1, 22, 4)
                     "hs": torch.from_numpy(res[-1]),  # (1, 22, 256)
-                    "aux_outputs": [{'pred_logits': res[i], 'pred_boxes': res[i+1]} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
+                    "aux_outputs": [{'pred_logits': torch.from_numpy(res[i]), 'pred_boxes': torch.from_numpy(res[i+1])} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
                 }
                 
                 print(frame_res["pred_logits"].view(-1).sigmoid())
