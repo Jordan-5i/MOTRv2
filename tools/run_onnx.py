@@ -321,10 +321,10 @@ class Detector(object):
                 self.calib_tarfile_qim.add(f"calib_data/qim/data_qim_{frame_id}.npy")
             # -------------------------------------- #
 
-            output_embedding, query_pos = self.track_embed.run(None, inputs)
+            ref_pts, query_pos = self.track_embed.run(None, inputs)
 
             track_instances.query_pos = torch.from_numpy(query_pos)
-            track_instances.output_embedding = torch.from_numpy(output_embedding)
+            track_instances.ref_pts = torch.from_numpy(ref_pts)
             frame_res["track_instances"] = track_instances
         else:
             frame_res["track_instances"] = None
@@ -375,7 +375,6 @@ class Detector(object):
                     "aux_outputs": [{'pred_logits': torch.from_numpy(res[i]), 'pred_boxes': torch.from_numpy(res[i+1])} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
                 }
                 
-                print(frame_res["pred_logits"].view(-1).sigmoid())
                 # ------------------------------------- #
                 if i < 20:
                     calib_data = {}
@@ -470,8 +469,8 @@ if __name__ == "__main__":
 
     # '''for MOT17 submit'''
     sub_dir = "DanceTrack/test"
-    # seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
-    seq_nums = ["dancetrack0064"]
+    seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
+    # seq_nums = ["dancetrack0011"]
     if "seqmap" in seq_nums:
         seq_nums.remove("seqmap")
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]

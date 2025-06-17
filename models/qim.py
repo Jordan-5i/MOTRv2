@@ -210,7 +210,7 @@ class QueryInteractionModulev2(QueryInteractionBase):
         query_feat = self.norm_feat(query_feat)
         query_pos_clone = torch.where(is_pos, query_feat, query_pos_clone)
 
-        return output_embedding, query_pos_clone
+        return ref_pts, query_pos_clone
         
 def pos2posemb(pos, num_pos_feats=64, temperature=10000):
     scale = 2 * math.pi

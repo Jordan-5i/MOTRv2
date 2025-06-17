@@ -66,6 +66,8 @@ if __name__ == '__main__':
     ws = int(os.environ.get('RLAUNCH_REPLICA_TOTAL', '1'))
     jobs = sorted(jobs)[rank::ws]
     for seq in jobs:
+        if not seq.endswith(".txt"):
+            continue
         print(seq)
 
         trk_path = os.path.join(output_txt_path, seq)

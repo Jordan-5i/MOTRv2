@@ -246,7 +246,7 @@ class Detector(object):
                         "query_pos",
                         "scores",
                     ],
-                    output_names=["output_embedding_", "query_pos_"],
+                    output_names=["new_ref_pts", "new_query_pos"],
                     dynamic_axes=dynamic_axes,
                     opset_version=16,
                 )
