@@ -75,7 +75,8 @@ class Detector(object):
     def __init__(self, args, model, vid):
         self.args = args
         self.detr = model
-
+        self.num_classes = 1
+        
         self.vid = vid
         self.seq_num = os.path.basename(vid)
         img_list = os.listdir(os.path.join(self.args.mot_path, vid, "img1"))
@@ -99,7 +100,58 @@ class Detector(object):
         areas = wh[:, 0] * wh[:, 1]
         keep = areas > area_threshold
         return dt_instances[keep]
+    
+    def _fill_tracks_to_max_len(self, track_instances: Instances, max_objs=50):
+        d_model = track_instances.query_pos.shape[-1]
+        device = track_instances.query_pos.device
+        remain_len = max_objs - len(track_instances)
+        
+        placeholder = Instances((1, 1))
+        placeholder.ref_pts = torch.zeros((remain_len, 4))
+        placeholder.query_pos = torch.zeros((remain_len, d_model))
+        
+        placeholder.output_embedding = torch.zeros(
+            (remain_len, d_model), device=device
+        )
+        placeholder.obj_idxes = torch.full(
+            (remain_len,), -1, dtype=torch.long, device=device
+        )
+        placeholder.matched_gt_idxes = torch.full(
+            (remain_len,), -1, dtype=torch.long, device=device
+        )
+        placeholder.disappear_time = torch.zeros(
+            (remain_len,), dtype=torch.long, device=device
+        )
+        placeholder.iou = torch.ones(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.scores = torch.zeros(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.track_scores = torch.zeros(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.pred_boxes = torch.zeros(
+            (remain_len, 4), dtype=torch.float, device=device
+        )
+        placeholder.pred_logits = torch.zeros(
+            (remain_len, self.num_classes), dtype=torch.float, device=device
+        )
 
+        mem_bank_len = 0
+        placeholder.mem_bank = torch.zeros(
+            (remain_len, mem_bank_len, d_model),
+            dtype=torch.float32,
+            device=device,
+        )
+        placeholder.mem_padding_mask = torch.ones(
+            (remain_len, mem_bank_len), dtype=torch.bool, device=device
+        )
+        placeholder.save_period = torch.zeros(
+            (remain_len,), dtype=torch.float32, device=device
+        )
+        return Instances.cat([track_instances, placeholder])
+    
     @torch.no_grad()
     def prepare_mask_pos_encoding(self, samples: NestedTensor):
         features, pos = self.detr.backbone(samples)
@@ -135,7 +187,7 @@ class Detector(object):
     def detect(self, prob_threshold=0.6, area_threshold=100, vis=False):
         total_dts = 0
         total_occlusion_dts = 0
-
+        
         track_instances = None
         with open(os.path.join(self.args.mot_path, self.args.det_db)) as f:
             det_db = json.load(f)
@@ -166,6 +218,7 @@ class Detector(object):
                 self.detr.cpu()
                 if track_instances_onnx is None:
                     track_instances_onnx = self.detr._generate_empty_tracks(proposals)
+                    track_instances_onnx = self._fill_tracks_to_max_len(track_instances_onnx, args.max_objs)
                 else:
                     track_instances_onnx = Instances.cat(
                         [
@@ -173,6 +226,7 @@ class Detector(object):
                             track_instances_onnx.to("cpu"),
                         ]
                     )
+                    track_instances_onnx = self._fill_tracks_to_max_len(track_instances_onnx, args.max_objs)
                 query_pos = track_instances_onnx.query_pos.cpu()
                 ref_pts = track_instances_onnx.ref_pts.cpu()
                 samples = nested_tensor_from_tensor_list(cur_img)
@@ -201,24 +255,19 @@ class Detector(object):
                 )
 
                 self.detr.forward = self.detr._onnx_forward_single_image
-                dynamic_axes = {
-                    'query_pos': {0: 'num_queries'},  # 22 -> 动态
-                    'ref_pts': {0: 'num_queries'}     # 22 -> 动态
-                }
                 torch.onnx.export(
                     self.detr,
                     (cur_img, query_pos, ref_pts),
-                    "motrv2-no-mask-position-dynamic.onnx",
+                    f"motrv2-max-{args.max_objs}-obj.onnx",
                     input_names=[
                         "cur_img",
                         "query_pos",
                         "ref_pts",
                     ],
-                    dynamic_axes=dynamic_axes,
                     opset_version=16,
                 )
 
-                # ----- qim -----#
+                # ----- QIMv2 -----#
                 track_instances = track_instances[track_instances.obj_idxes >= 0]
 
                 query_pos = track_instances.query_pos.cpu()
@@ -226,19 +275,21 @@ class Detector(object):
                 scores = track_instances.scores.cpu()
                 output_embedding = track_instances.output_embedding.cpu()
                 pred_boxes = track_instances.pred_boxes.cpu()
+                
+                # 填充无效信息将第一维大小变成max_tracks
+                num_tracks, d_model = query_pos.shape
+                remain_len = args.max_tracks - num_tracks
+                query_pos = torch.cat([query_pos, torch.zeros((remain_len, d_model))], dim=0)
+                ref_pts = torch.cat([ref_pts, torch.zeros((remain_len, 4))], dim=0)
+                scores = torch.cat([scores, torch.zeros((remain_len, ))], dim=0)
+                output_embedding = torch.cat([output_embedding, torch.zeros((remain_len, d_model))], dim=0)
+                pred_boxes = torch.cat([pred_boxes, torch.zeros((remain_len, 4))], dim=0)
 
                 self.detr.track_embed.forward = self.detr.track_embed.onnx_forward
-                dynamic_axes = {
-                    'pred_boxes': {0: 'num_queries'},
-                    'output_embedding': {0: 'num_queries'},
-                    'query_pos': {0: 'num_queries'},  # 22 -> 动态
-                    'ref_pts': {0: 'num_queries'},     # 22 -> 动态
-                    'scores': {0: 'num_queries'},
-                }
                 torch.onnx.export(
                     self.detr.track_embed,
                     (pred_boxes, output_embedding, ref_pts, query_pos, scores),
-                    "qim-dynamic.onnx",
+                    "qim.onnx",
                     input_names=[
                         "pred_boxes",
                         "output_embedding",
@@ -247,7 +298,6 @@ class Detector(object):
                         "scores",
                     ],
                     output_names=["new_ref_pts", "new_query_pos"],
-                    dynamic_axes=dynamic_axes,
                     opset_version=16,
                 )
 
@@ -347,6 +397,8 @@ if __name__ == "__main__":
     args.batch_size = 1
     args.output_dir = "."
     args.export = True
+    args.max_objs = 50  # max_objs=(object_query+proposals+track_query)+填充的无效tensor, 目的为了消除decoder的输入query_pos，ref_pts中第一维是动态维，设置此参数.
+    args.max_tracks = 10 # max_tracks是用于QIMv2模块，定义QIM中能够跟踪到的最大目标数
     
     # load model and weights
     detr, _, _ = build_model(args)
@@ -362,7 +414,7 @@ if __name__ == "__main__":
     # '''for MOT17 submit'''
     sub_dir = "DanceTrack/test"
     # seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
-    seq_nums = ["dancetrack0064"]
+    seq_nums = ["dancetrack0011"]
     if "seqmap" in seq_nums:
         seq_nums.remove("seqmap")
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]

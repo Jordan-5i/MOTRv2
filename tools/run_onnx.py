@@ -205,6 +205,57 @@ class Detector(object):
         keep = areas > area_threshold
         return dt_instances[keep]
 
+    def _fill_tracks_to_max_len(self, track_instances: Instances, max_objs=50):
+        d_model = track_instances.query_pos.shape[-1]
+        device = track_instances.query_pos.device
+        remain_len = max_objs - len(track_instances)
+        
+        placeholder = Instances((1, 1))
+        placeholder.ref_pts = torch.zeros((remain_len, 4))
+        placeholder.query_pos = torch.zeros((remain_len, d_model))
+        
+        placeholder.output_embedding = torch.zeros(
+            (remain_len, d_model), device=device
+        )
+        placeholder.obj_idxes = torch.full(
+            (remain_len,), -1, dtype=torch.long, device=device
+        )
+        placeholder.matched_gt_idxes = torch.full(
+            (remain_len,), -1, dtype=torch.long, device=device
+        )
+        placeholder.disappear_time = torch.zeros(
+            (remain_len,), dtype=torch.long, device=device
+        )
+        placeholder.iou = torch.ones(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.scores = torch.zeros(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.track_scores = torch.zeros(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.pred_boxes = torch.zeros(
+            (remain_len, 4), dtype=torch.float, device=device
+        )
+        placeholder.pred_logits = torch.zeros(
+            (remain_len, self.num_classes), dtype=torch.float, device=device
+        )
+
+        mem_bank_len = 0
+        placeholder.mem_bank = torch.zeros(
+            (remain_len, mem_bank_len, d_model),
+            dtype=torch.float32,
+            device=device,
+        )
+        placeholder.mem_padding_mask = torch.ones(
+            (remain_len, mem_bank_len), dtype=torch.bool, device=device
+        )
+        placeholder.save_period = torch.zeros(
+            (remain_len,), dtype=torch.float32, device=device
+        )
+        return Instances.cat([track_instances, placeholder])
+    
     def _generate_empty_tracks(self, proposals=None):
         query_embed_weight = torch.from_numpy(np.load("query_embed.weight.npy"))
         yolox_embed_weight = torch.from_numpy(np.load("yolox_embed.weight.npy"))
@@ -285,7 +336,7 @@ class Detector(object):
             frame_res['ps_outputs'] = ps_outputs
             
         track_scores = frame_res["pred_logits"][0, :, 0].sigmoid()
-
+        print(track_scores)
         track_instances.scores = track_scores
         track_instances.pred_logits = frame_res["pred_logits"][0]
         track_instances.pred_boxes = frame_res["pred_boxes"][0]
@@ -297,9 +348,13 @@ class Detector(object):
             track_instances = self.memory_bank(track_instances)
 
         if not is_last:
-            # 对应QIM._select_active_tracks()
+            # 对应 QIM._select_active_tracks()
             track_instances = track_instances[track_instances.obj_idxes >= 0]
-            # track_embed 对应QIM._update_track_embedding()
+            
+            # 填充无效数据将第一维大小变成args.max_tracks
+            track_instances = self._fill_tracks_to_max_len(track_instances, args.max_tracks)
+            
+            # track_embed 对应 QIM._update_track_embedding()
             inputs = {
                 "pred_boxes": track_instances.pred_boxes.numpy(),
                 "output_embedding": track_instances.output_embedding.numpy(),
@@ -307,17 +362,10 @@ class Detector(object):
                 "query_pos": track_instances.query_pos.numpy(),
                 "scores": track_instances.scores.numpy(),
             }
-            # -------------------------------------- #
+
+            # -------- 保存量化校准数据 ------------- #
             if frame_id < 20:
-                calib_data = {}
-                calib_data["pred_boxes"] = track_instances.pred_boxes.numpy()
-                calib_data[
-                    "output_embedding"
-                ] = track_instances.output_embedding.detach().numpy()
-                calib_data["ref_pts"] = track_instances.ref_pts.detach().numpy()
-                calib_data["query_pos"] = track_instances.query_pos.detach().numpy()
-                calib_data["scores"] = track_instances.scores.numpy()
-                np.save(f"calib_data/qim/data_qim_{frame_id}.npy", calib_data)
+                np.save(f"calib_data/qim/data_qim_{frame_id}.npy", inputs)
                 self.calib_tarfile_qim.add(f"calib_data/qim/data_qim_{frame_id}.npy")
             # -------------------------------------- #
 
@@ -355,10 +403,12 @@ class Detector(object):
 
                 if track_instances is None:
                     track_instances = self._generate_empty_tracks(proposals)
+                    track_instances = self._fill_tracks_to_max_len(track_instances, args.max_objs)
                 else:
                     track_instances = Instances.cat(
                         [self._generate_empty_tracks(proposals), track_instances]
                     )
+                    track_instances = self._fill_tracks_to_max_len(track_instances, args.max_objs)
 
                 inputs = {
                     "cur_img": cur_img.numpy(),
@@ -375,13 +425,9 @@ class Detector(object):
                     "aux_outputs": [{'pred_logits': torch.from_numpy(res[i]), 'pred_boxes': torch.from_numpy(res[i+1])} for i in [2, 4, 6, 8, 10]] # 第1~5个layer的输出
                 }
                 
-                # ------------------------------------- #
+                # -----------保存量化校准数据------------ #
                 if i < 20:
-                    calib_data = {}
-                    calib_data["cur_img"] = cur_img.numpy()
-                    calib_data["ref_pts"] = track_instances.ref_pts.numpy()
-                    calib_data["query_pos"] = track_instances.query_pos.numpy()
-                    np.save(f"calib_data/motrv2/data_motrv2_{i}.npy", calib_data)
+                    np.save(f"calib_data/motrv2/data_motrv2_{i}.npy", inputs)
                     self.calib_tarfile_motr.add(
                         f"calib_data/motrv2/data_motrv2_{i}.npy"
                     )
@@ -462,15 +508,20 @@ if __name__ == "__main__":
     args.exp_name = "onnx_output"
     args.det_db = "/data/wangjian/project/hf_cache/DanceTrack/det_db_motrv2.json"
 
-    motr_model_path = "motrv2-no-mask-position-dynamic-sim.onnx"
-    qim_model_path = "qim-dynamic-sim.onnx"
+    # max_objs=(object_query+proposals+track_query)+填充的无效tensor, 目的为了消除decoder的输入query_pos，ref_pts中第一维是动态维，设置此参数.
+    args.max_objs = 50
+    # max_tracks是用于QIMv2模块，定义QIM中能够跟踪到的最大目标数
+    args.max_tracks = 10
+    
+    motr_model_path = "motrv2-max-50-obj-sim.onnx"
+    qim_model_path = "qim-sim.onnx"
     motr_model = onnxruntime.InferenceSession(motr_model_path)
     qim_model = onnxruntime.InferenceSession(qim_model_path)
 
     # '''for MOT17 submit'''
     sub_dir = "DanceTrack/test"
-    seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
-    # seq_nums = ["dancetrack0011"]
+    # seq_nums = os.listdir(os.path.join(args.mot_path, sub_dir))[:1]
+    seq_nums = ["dancetrack0011"]
     if "seqmap" in seq_nums:
         seq_nums.remove("seqmap")
     vids = [os.path.join(sub_dir, seq) for seq in seq_nums]

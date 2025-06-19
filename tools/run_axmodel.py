@@ -19,7 +19,7 @@ try:
     from models.structures import Instances
 except ImportError:
     from instances import Instances
-import axengine as axe
+import axengine as axe  
 from axengine import axclrt_provider_name, axengine_provider_name
 
 
@@ -217,6 +217,57 @@ class Detector(object):
         keep = areas > area_threshold
         return dt_instances[keep]
 
+    def _fill_tracks_to_max_len(self, track_instances: Instances, max_objs=50):
+        d_model = track_instances.query_pos.shape[-1]
+        device = track_instances.query_pos.device
+        remain_len = max_objs - len(track_instances)
+        
+        placeholder = Instances((1, 1))
+        placeholder.ref_pts = torch.zeros((remain_len, 4))
+        placeholder.query_pos = torch.zeros((remain_len, d_model))
+        
+        placeholder.output_embedding = torch.zeros(
+            (remain_len, d_model), device=device
+        )
+        placeholder.obj_idxes = torch.full(
+            (remain_len,), -1, dtype=torch.long, device=device
+        )
+        placeholder.matched_gt_idxes = torch.full(
+            (remain_len,), -1, dtype=torch.long, device=device
+        )
+        placeholder.disappear_time = torch.zeros(
+            (remain_len,), dtype=torch.long, device=device
+        )
+        placeholder.iou = torch.ones(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.scores = torch.zeros(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.track_scores = torch.zeros(
+            (remain_len,), dtype=torch.float, device=device
+        )
+        placeholder.pred_boxes = torch.zeros(
+            (remain_len, 4), dtype=torch.float, device=device
+        )
+        placeholder.pred_logits = torch.zeros(
+            (remain_len, self.num_classes), dtype=torch.float, device=device
+        )
+
+        mem_bank_len = 0
+        placeholder.mem_bank = torch.zeros(
+            (remain_len, mem_bank_len, d_model),
+            dtype=torch.float32,
+            device=device,
+        )
+        placeholder.mem_padding_mask = torch.ones(
+            (remain_len, mem_bank_len), dtype=torch.bool, device=device
+        )
+        placeholder.save_period = torch.zeros(
+            (remain_len,), dtype=torch.float32, device=device
+        )
+        return Instances.cat([track_instances, placeholder])
+    
     def _generate_empty_tracks(self, proposals=None):
         query_embed_weight = torch.from_numpy(np.load("query_embed.weight.npy"))
         yolox_embed_weight = torch.from_numpy(np.load("yolox_embed.weight.npy"))
@@ -311,6 +362,10 @@ class Detector(object):
         if not is_last:
             # 对应QIM._select_active_tracks()
             track_instances = track_instances[track_instances.obj_idxes >= 0]
+            
+            # 填充无效数据将第一维大小变成args.max_tracks
+            track_instances = self._fill_tracks_to_max_len(track_instances, args.max_tracks)
+
             # track_embed 对应QIM._update_track_embedding()
             inputs = {
                 "pred_boxes": track_instances.pred_boxes.numpy(),
@@ -352,15 +407,13 @@ class Detector(object):
 
                 if track_instances is None:
                     track_instances = self._generate_empty_tracks(proposals)
-                    # 为了适配axmodel输入为22
-                    track_instances = Instances.cat(
-                        [track_instances[:6], track_instances]
-                    )
+                    track_instances = self._fill_tracks_to_max_len(track_instances, args.max_objs)
                 else:
                     track_instances = Instances.cat(
                         [self._generate_empty_tracks(proposals), track_instances]
                     )
-
+                    track_instances = self._fill_tracks_to_max_len(track_instances, args.max_objs)
+                
                 inputs = {
                     "cur_img": cur_img.numpy(),
                     "query_pos": track_instances.query_pos.numpy(),
@@ -441,9 +494,14 @@ if __name__ == "__main__":
     args.mot_path = "."
     args.exp_name = "axmodel_output"
     args.det_db = "det_db_motrv2.json"
-
-    motr_model_path = "motr-complied.axmodel"
-    qim_model_path = "qim-complied.axmodel"
+    
+    # max_objs=(object_query+proposals+track_query)+填充的无效tensor, 目的为了消除decoder的输入query_pos，ref_pts中第一维是动态维，设置此参数.
+    args.max_objs = 50
+    # max_tracks是用于QIMv2模块，定义QIM中能够跟踪到的最大目标数
+    args.max_tracks = 10 
+    
+    motr_model_path = "motr-compiled.axmodel"
+    qim_model_path = "qim-compiled.axmodel"
     motr_axmodel = load_model(motr_model_path, selected_provider="AUTO")
     qim_axmodel = load_model(qim_model_path, selected_provider="AUTO")
 

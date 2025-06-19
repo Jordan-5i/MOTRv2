@@ -32,7 +32,7 @@
     └── qim
         └── data_qim.tar
     ```
-
+> 导出onnx注意事项：在`tools/export_onnx.py`中需要设置 `max_objs` 和 `max_tracks`两个参数，目的是为了在编译模型时固定第一维的大小，以避免动态维上板推理带来的麻烦。
 
 ## 使用pulsar2工具链量化onnx模型
 > 量化工具使用方法参考：https://npu.pages-git-ext.axera-tech.com/pulsar2-docs/index.html
@@ -64,9 +64,9 @@ pulsar2 build --input qim-sim.onnx --config config_qim.json --output_dir output_
 
 ```bash
 # 分别把2个compiled.axmodel重命名
-scp output_motr/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/motr-complied.axmodel
+scp output_motr/compiled.axmodel root@10.168.232.183:/root/wangjian/motrv2/motr-complied.axmodel
 
-scp output_qim/compiled.axmodel root@10.168.232.85:/root/wangjian/motrv2/qim-complied.axmodel
+scp output_qim/compiled.axmodel root@10.168.232.183:/root/wangjian/motrv2/qim-complied.axmodel
 ```
 
 板子上的目录结构如下：
